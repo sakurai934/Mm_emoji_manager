@@ -220,6 +220,33 @@ class BatchUploadWorker(QRunnable):
 
         self.signals.finished.emit(results)
 
+class BatchDeleteWorker(QRunnable):
+    """Delete multiple emojis sequentially in background (continue on error)."""
+    def __init__(self, client: MattermostClient, tasks: list[tuple[int, str, str]]):
+        """
+        tasks: list of (row_index, emoji_name, emoji_id)
+        """
+        super().__init__()
+        self.client = client
+        self.tasks = tasks
+        self.signals = WorkerSignals()
+
+    @Slot()
+    def run(self) -> None:
+        results = []
+        total = len(self.tasks)
+
+        for i, (row, name, emoji_id) in enumerate(self.tasks, start=1):
+            try:
+                self.signals.progress.emit(f"Deleting {i}/{total}: :{name}:")
+                self.client.delete_emoji(emoji_id)
+                results.append((row, True, None, ""))
+            except Exception as e:
+                results.append((row, False, None, str(e)))
+
+        self.signals.finished.emit(results)
+
+
 # -----------------------------
 # Table Model
 # -----------------------------
@@ -436,7 +463,7 @@ class MainWindow(QMainWindow):
         self.btn_pick_folder.clicked.connect(self.on_load_folder)
         self.btn_validate.clicked.connect(self.on_validate)
         self.btn_go_upload.clicked.connect(self.on_upload)
-        self.btn_delete.clicked.connect(self.on_delete_stub)
+        self.btn_delete.clicked.connect(self.on_delete)
         self.btn_rename.clicked.connect(self.on_rename_stub)
 
         self.table.selectionModel().selectionChanged.connect(self.on_selection_changed)
@@ -678,9 +705,71 @@ class MainWindow(QMainWindow):
 
 
     @Slot()
-    def on_delete_stub(self) -> None:
-        """Placeholder: will delete checked SERVER items (or BOTH) by server_id."""
-        QMessageBox.information(self, "Delete (stub)", "Delete logic is not implemented yet.")
+    def on_delete(self) -> None:
+        """Delete checked items that exist on server (SERVER_ONLY or BOTH)."""
+        try:
+            client = self._make_client()
+        except Exception as e:
+            self._error(str(e))
+            return
+
+        checked_rows = [(idx, it) for idx, it in enumerate(self.model.items) if it.checked]
+        if not checked_rows:
+            QMessageBox.information(self, "Delete", "No rows checked.")
+            return
+
+        # Always refresh cache before destructive ops
+        self._set_status("Refreshing server cache...")
+        if not self._refresh_server_cache_sync():
+            return
+        self.on_validate()
+
+        # Delete対象：server_id がある行のみ
+        tasks: list[tuple[int, str, str]] = []
+        invalid = []
+        for idx, it in checked_rows:
+            name = (it.desired_name or it.base_name).strip()
+            if not it.server_id:
+                invalid.append((idx, name, it.status.name))
+                continue
+            tasks.append((idx, name, it.server_id))
+
+        if not tasks:
+            QMessageBox.information(
+                self,
+                "Delete",
+                "No deletable items among checked rows.\n"
+                "Only items with Server ID can be deleted.",
+            )
+            return
+
+        # まとめて確認（名前一覧を見せる）
+        preview = "\n".join([f"- :{name}:" for (_row, name, _id) in tasks[:30]])
+        if len(tasks) > 30:
+            preview += f"\n... and {len(tasks) - 30} more"
+
+        extra = ""
+        if invalid:
+            extra_lines = "\n".join([f"- row {r+1}: :{n}: status={s} (no server_id)" for (r, n, s) in invalid[:10]])
+            if len(invalid) > 10:
+                extra_lines += f"\n... and {len(invalid) - 10} more"
+            extra = "\n\nThese checked rows will be ignored (no Server ID):\n" + extra_lines
+
+        if QMessageBox.question(
+            self,
+            "Confirm Delete",
+            f"Delete {len(tasks)} emojis from server?\n\n{preview}{extra}\n\nThis operation cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        ) != QMessageBox.Yes:
+            return
+
+        self._set_status("Deleting...")
+        worker = BatchDeleteWorker(client, tasks)
+        worker.signals.progress.connect(self._set_status)
+        worker.signals.finished.connect(self._on_delete_finished)
+        worker.signals.error.connect(self._on_worker_error)
+        self.thread_pool.start(worker)
 
     @Slot()
     def on_rename_stub(self) -> None:
@@ -798,6 +887,53 @@ class MainWindow(QMainWindow):
         )
 
         self._set_status(f"Upload finished. success={len(success)} failed={len(failed)}")
+
+    @Slot(object)
+    def _on_delete_finished(self, result: object) -> None:
+        """
+        result: list of (row_index, ok, _, message)
+        """
+        assert isinstance(result, list)
+
+        success = []
+        failed = []
+
+        for (row, ok, _created, msg) in result:
+            it = self.model.items[row]
+            it.checked = False
+
+            if ok:
+                # server_cache から除去
+                key = (it.desired_name or it.base_name).strip().lower()
+                if key in self.server_cache:
+                    del self.server_cache[key]
+
+                # モデル側のサーバ情報もクリア（ローカルがあればLOCAL_ONLYへ、なければ空状態）
+                it.server_has = False
+                it.server_id = None
+                success.append(key)
+            else:
+                name = (it.desired_name or it.base_name).strip().lower()
+                failed.append((name, msg))
+
+        self.on_validate()
+        self.model.layoutChanged.emit()
+
+        lines = []
+        if success:
+            lines.append(f"✓ Deleted: {len(success)}")
+            for n in success:
+                lines.append(f"  - :{n}:")
+        if failed:
+            lines.append("")
+            lines.append(f"✗ Failed: {len(failed)}")
+            for n, msg in failed:
+                lines.append(f"  - :{n}: {msg}")
+
+        QMessageBox.information(self, "Delete result", "\n".join(lines) if lines else "No result.")
+        self._set_status(f"Delete finished. deleted={len(success)} failed={len(failed)}")
+
+
 
     def _refresh_server_cache_sync(self) -> bool:
         """Refresh server_cache synchronously. Return True if success."""
