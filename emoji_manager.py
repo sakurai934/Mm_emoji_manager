@@ -10,6 +10,8 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+
+
 import requests
 from PySide6.QtCore import (
     QAbstractTableModel,
@@ -20,7 +22,10 @@ from PySide6.QtCore import (
     QThreadPool,
     Signal,
     Slot,
-    QSize
+    QSize,
+    QByteArray,
+    QBuffer,
+    QIODevice
 )
 from PySide6.QtGui import QPixmap, QMovie
 
@@ -107,6 +112,9 @@ class EmojiItem:
     # computed
     status: ItemStatus = ItemStatus.LOCAL_ONLY
     detail: str = ""
+    server_thumb: Optional[QPixmap] = None
+    thumb_fetching: bool = False
+
 
 
 # -----------------------------
@@ -140,6 +148,14 @@ class MattermostClient:
             page += 1
 
         return out
+    
+    def list_my_emojis(client: MattermostClient) -> list[dict]:
+        me = client.get_me()
+        my_id = me["id"]
+
+        all_emojis = client.list_emojis()
+        return [e for e in all_emojis if e.get("creator_id") == my_id]
+
 
     def get_emoji_image(self, emoji_id: str) -> bytes:
         """GET /api/v4/emoji/{emoji_id}/image"""
@@ -148,17 +164,92 @@ class MattermostClient:
         r.raise_for_status()
         return r.content
 
-    def create_emoji(self, name: str, image_path: Path) -> Dict[str, Any]:
-        """POST /api/v4/emoji multipart: emoji(json) + image(file)"""
-        url = f"{self.server_url}/api/v4/emoji"
-        payload = {"name": name}
-        files = {
-            "emoji": (None, json.dumps(payload), "application/json"),
-            "image": (image_path.name, image_path.read_bytes(), "application/octet-stream"),
-        }
-        r = self.session.post(url, files=files, timeout=self.timeout_sec)
-        r.raise_for_status()
+    # def create_emoji(self, name: str, image_path: Path) -> Dict[str, Any]:
+    #     """POST /api/v4/emoji multipart: emoji(json) + image(file)"""
+    #     url = f"{self.server_url}/api/v4/emoji"
+    #     payload = {"name": name}
+    #     files = {
+    #         "emoji": (None, json.dumps(payload), "application/json"),
+    #         "image": (image_path.name, image_path.read_bytes(), "application/octet-stream"),
+    #     }
+    #     r = self.session.post(url, files=files, timeout=self.timeout_sec)
+    #     r.raise_for_status()
+    #     return r.json()
+    
+    # def create_emoji(self, name: str, image_path: Path) -> Dict[str, Any]:
+    #     url = f"{self.server_url}/api/v4/emoji"
+    #     payload = {"name": name}
+    #     files = {
+    #         "emoji": (None, json.dumps(payload), "application/json"),
+    #         "image": (image_path.name, image_path.read_bytes(), "application/octet-stream"),
+    #     }
+    #     r = self.session.post(url, files=files, timeout=self.timeout_sec)
+    #     if r.status_code >= 400:
+    #         raise RuntimeError(f"HTTP {r.status_code} {r.reason}\nURL: {r.url}\nBody:\n{r.text}")
+    #     return r.json()
+    # def create_emoji(self, name: str, image_path: Path) -> Dict[str, Any]:
+    #     url = f"{self.server_url}/api/v4/emoji"
+    #     payload = {"name": name}
+    #     files = {
+    #         "emoji": (None, json.dumps(payload), "application/json"),
+    #         "image": (image_path.name, image_path.read_bytes(), "application/octet-stream"),
+    #     }
+    #     r = self.session.post(url, files=files, timeout=self.timeout_sec)
+    #     if r.status_code >= 400:
+    #         raise RuntimeError(f"HTTP {r.status_code} {r.reason}\nURL: {r.url}\nBody:\n{r.text}")
+    #     return r.json()
+    
+    # def create_emoji(self, name: str, image_path: Path) -> dict:
+    #     url = f"{self.server_url}/api/v4/emoji"
+
+    #     with open(image_path, "rb") as f:
+    #         files = {
+    #             "image": (image_path.name, f, "application/octet-stream"),
+    #         }
+    #         data = {
+    #             # emoji は「JSON文字列」として data で送るのが重要
+    #             "emoji": json.dumps({
+    #                 "name": name
+    #             })
+    #         }
+
+    #         r = self.session.post(url, data=data, files=files, timeout=self.timeout_sec)
+
+    #     if r.status_code >= 400:
+    #         raise RuntimeError(
+    #             f"HTTP {r.status_code}\nURL: {r.url}\nBody:\n{r.text}"
+    #         )
+
+    #     return r.json()
+
+
+    def get_me(self) -> dict:
+        url = f"{self.server_url}/api/v4/users/me"
+        r = self.session.get(url, timeout=self.timeout_sec)
+        if r.status_code >= 400:
+            raise RuntimeError(f"HTTP {r.status_code}\nURL: {r.url}\nBody:\n{r.text}")
         return r.json()
+
+    def create_emoji(self, name: str, image_path: Path, creator_id: str) -> dict:
+        url = f"{self.server_url}/api/v4/emoji"
+
+        with open(image_path, "rb") as f:
+            files = {
+                "image": (image_path.name, f, "application/octet-stream"),
+            }
+            data = {
+                "emoji": json.dumps({
+                    "name": name,
+                    "creator_id": creator_id,
+                })
+            }
+            r = self.session.post(url, data=data, files=files, timeout=self.timeout_sec)
+
+        if r.status_code >= 400:
+            raise RuntimeError(f"HTTP {r.status_code}\nURL: {r.url}\nBody:\n{r.text}")
+
+        return r.json()
+
 
     def delete_emoji(self, emoji_id: str) -> None:
         """DELETE /api/v4/emoji/{emoji_id}"""
@@ -203,6 +294,7 @@ class BatchUploadWorker(QRunnable):
         self.client = client
         self.tasks = tasks
         self.signals = WorkerSignals()
+        self.me = self.client.get_me()
 
     @Slot()
     def run(self) -> None:
@@ -212,7 +304,9 @@ class BatchUploadWorker(QRunnable):
         for i, (row, name, path) in enumerate(self.tasks, start=1):
             try:
                 self.signals.progress.emit(f"Uploading {i}/{total}: :{name}:")
-                created = self.client.create_emoji(name, path)
+                
+                creator_id = self.me["id"]
+                created = self.client.create_emoji(name, path, creator_id)
                 results.append((row, True, created, ""))
             except Exception as e:
                 # 失敗しても続行
@@ -245,6 +339,39 @@ class BatchDeleteWorker(QRunnable):
                 results.append((row, False, None, str(e)))
 
         self.signals.finished.emit(results)
+
+class FetchEmojiImageWorker(QRunnable):
+    """Fetch emoji image bytes by emoji_id in background."""
+    def __init__(self, client: MattermostClient, emoji_id: str):
+        super().__init__()
+        self.client = client
+        self.emoji_id = emoji_id
+        self.signals = WorkerSignals()
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            self.signals.progress.emit(f"Fetching server image: {self.emoji_id}")
+            b = self.client.get_emoji_image(self.emoji_id)  # bytes
+            self.signals.finished.emit((self.emoji_id, b))
+        except Exception as e:
+            self.signals.error.emit(str(e))
+
+class FetchEmojiThumbWorker(QRunnable):
+    def __init__(self, client: MattermostClient, row: int, emoji_id: str):
+        super().__init__()
+        self.client = client
+        self.row = row
+        self.emoji_id = emoji_id
+        self.signals = WorkerSignals()
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            b = self.client.get_emoji_image(self.emoji_id)
+            self.signals.finished.emit((self.row, self.emoji_id, b))
+        except Exception as e:
+            self.signals.error.emit(str(e))
 
 
 # -----------------------------
@@ -316,10 +443,18 @@ class EmojiTableModel(QAbstractTableModel):
                 return Qt.CheckState.Checked if item.checked else Qt.CheckState.Unchecked
             return None
 
+        # if col == self.COL_THUMB:
+        #     if role == Qt.DecorationRole and item.local_thumb is not None:
+        #         return item.local_thumb
+        #     return None
         if col == self.COL_THUMB:
-            if role == Qt.DecorationRole and item.local_thumb is not None:
-                return item.local_thumb
+            if role == Qt.ItemDataRole.DecorationRole:
+                if item.local_thumb is not None:
+                    return item.local_thumb
+                if item.server_thumb is not None:
+                    return item.server_thumb
             return None
+
 
         if role == Qt.DisplayRole:
             if col == self.COL_BASE:
@@ -369,6 +504,17 @@ class MainWindow(QMainWindow):
 
         # cached server emojis: name(lower) -> (id, raw json)
         self.server_cache: Dict[str, Dict[str, Any]] = {}
+        self.session_user_id: str | None = None
+        # server image cache: emoji_id -> bytes
+        self.server_image_cache: dict[str, bytes] = {}
+
+        # selection guard (race prevention)
+        self._current_selected_server_id: str | None = None
+
+        # for in-memory GIF playback (must keep alive)
+        self._movie: QMovie | None = None
+        self._movie_buffer: QBuffer | None = None
+
 
         # UI
         self.server_edit = QLineEdit()
@@ -381,6 +527,8 @@ class MainWindow(QMainWindow):
 
         self.btn_connect = QPushButton("Connect & Refresh Server Cache")
         self.btn_pick_folder = QPushButton("Load Folder…")
+        self.btn_load_server_mine = QPushButton("Load Server (Mine)")
+
         self.btn_validate = QPushButton("Validate / Recompute Status")
         self.btn_go_upload = QPushButton("GO: Upload Checked")
         self.btn_delete = QPushButton("Delete Checked (stub)")
@@ -431,6 +579,7 @@ class MainWindow(QMainWindow):
         btn_row = QHBoxLayout()
         btn_row.addWidget(self.btn_connect)
         btn_row.addWidget(self.btn_pick_folder)
+        btn_row.addWidget(self.btn_load_server_mine)
         btn_row.addWidget(self.btn_validate)
         btn_row.addStretch(1)
         btn_row.addWidget(self.btn_go_upload)
@@ -461,6 +610,7 @@ class MainWindow(QMainWindow):
         # Signals
         self.btn_connect.clicked.connect(self.on_connect_refresh)
         self.btn_pick_folder.clicked.connect(self.on_load_folder)
+        self.btn_load_server_mine.clicked.connect(self.on_load_server_mine)
         self.btn_validate.clicked.connect(self.on_validate)
         self.btn_go_upload.clicked.connect(self.on_upload)
         self.btn_delete.clicked.connect(self.on_delete)
@@ -470,6 +620,10 @@ class MainWindow(QMainWindow):
 
         # seed empty
         self.model.set_items([])
+
+        self.table.verticalScrollBar().valueChanged.connect(lambda _v: self._prefetch_visible_thumbs())
+
+
 
     # -------------------------
     # Helpers
@@ -495,6 +649,141 @@ class MainWindow(QMainWindow):
 
     def _error(self, message: str) -> None:
         QMessageBox.critical(self, "Error", message)
+
+    def _is_gif_bytes(self, b: bytes) -> bool:
+        return len(b) >= 6 and (b[:6] == b"GIF87a" or b[:6] == b"GIF89a")
+
+    def _show_image_bytes_in_preview(self, b: bytes) -> None:
+        # Stop old movie
+        if self._movie is not None:
+            self._movie.stop()
+        self._movie = None
+        self._movie_buffer = None
+
+        # GIF: animate from memory via QMovie + QBuffer
+        if self._is_gif_bytes(b):
+            self.preview_label.setText("")
+            self.preview_label.setPixmap(QPixmap())
+            self.preview_label.setMovie(None)
+
+            ba = QByteArray(b)
+            buf = QBuffer()
+            buf.setData(ba)
+            buf.open(QIODevice.OpenModeFlag.ReadOnly)
+
+            movie = QMovie(buf)  # QMovie keeps a pointer; buffer must stay alive
+            self._movie = movie
+            self._movie_buffer = buf
+
+            def render_frame():
+                if self._movie is None:
+                    return
+                px = self._movie.currentPixmap()
+                if px.isNull():
+                    return
+                w = max(64, self.preview_label.width() - 16)
+                h = max(64, self.preview_label.height() - 16)
+                px = px.scaled(
+                    w, h,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                self.preview_label.setPixmap(px)
+
+            self._movie.frameChanged.connect(lambda _i: render_frame())
+            self._movie.start()
+            render_frame()
+            return
+
+        # Non-GIF: show as pixmap
+        px = QPixmap()
+        px.loadFromData(b)
+        if px.isNull():
+            self.preview_label.setPixmap(QPixmap())
+            self.preview_label.setText("Failed to decode server image")
+            return
+
+        w = max(64, self.preview_label.width() - 16)
+        h = max(64, self.preview_label.height() - 16)
+        px = px.scaled(
+            w, h,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.preview_label.setMovie(None)
+        self.preview_label.setPixmap(px)
+        self.preview_label.setText("")
+
+    def _make_icon_pixmap_from_bytes(self, b: bytes, size: int = 32) -> QPixmap | None:
+        px = QPixmap()
+        if not px.loadFromData(b):
+            return None
+        return px.scaled(
+            size, size,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+
+    def _prefetch_visible_thumbs(self) -> None:
+        # テーブルが空なら何もしない
+        if self.model.rowCount() == 0:
+            return
+
+        # 可視範囲の上端・下端の行を推定
+        top_index = self.table.indexAt(self.table.viewport().rect().topLeft())
+        bottom_index = self.table.indexAt(self.table.viewport().rect().bottomLeft())
+
+        if not top_index.isValid():
+            return
+
+        top_row = top_index.row()
+        bottom_row = bottom_index.row() if bottom_index.isValid() else min(self.model.rowCount() - 1, top_row + 30)
+
+        # 取得要求
+        for row in range(top_row, bottom_row + 1):
+            self._ensure_thumb_for_row(row)
+
+    def _ensure_thumb_for_row(self, row: int) -> None:
+        it = self.model.items[row]
+
+        # ローカルサムネがあるなら不要
+        if it.local_thumb is not None:
+            return
+
+        # サーバIDが無いなら不要
+        if not it.server_id:
+            return
+
+        # 既に持っているなら不要
+        if it.server_thumb is not None:
+            return
+
+        emoji_id = it.server_id
+
+        # bytesキャッシュがあれば、それから作る（通信なし）
+        if emoji_id in self.server_image_cache:
+            px = self._make_icon_pixmap_from_bytes(self.server_image_cache[emoji_id], size=32)
+            if px is not None:
+                it.server_thumb = px
+                idx = self.model.index(row, EmojiTableModel.COL_THUMB)
+                self.model.dataChanged.emit(idx, idx, [Qt.ItemDataRole.DecorationRole])
+            return
+
+        # 取得中なら不要
+        if it.thumb_fetching:
+            return
+
+        # 取得開始
+        try:
+            client = self._make_client()
+        except Exception:
+            return
+
+        it.thumb_fetching = True
+        worker = FetchEmojiThumbWorker(client, row, emoji_id)
+        worker.signals.finished.connect(self._on_thumb_fetched)
+        worker.signals.error.connect(self._on_worker_error)
+        self.thread_pool.start(worker)
 
     # -------------------------
     # Actions
@@ -625,9 +914,68 @@ class MainWindow(QMainWindow):
         self.model.layoutChanged.emit()
         self._set_status("Validate complete.")
 
-    # -------------------------
-    # Stubs for next steps
-    # -------------------------
+    @Slot()
+    def on_load_server_mine(self) -> None:
+        # 常に最新化（安全）
+        self._set_status("Refreshing server cache...")
+        if not self._refresh_server_cache_sync():
+            return
+
+        if not self.session_user_id:
+            self._error("Failed to determine current user id.")
+            return
+
+        my_id = self.session_user_id
+
+        # 既存モデルを name->item で引けるように（desired_name基準）
+        by_name: dict[str, EmojiItem] = {}
+        for it in self.model.items:
+            ok, norm, _reason = validate_name(it.desired_name)
+            key = (norm if ok else it.desired_name).strip().lower()
+            if key:
+                by_name[key] = it
+
+        added = 0
+        updated = 0
+
+        # server_cache から creator_id で絞り込み
+        for name, e in self.server_cache.items():
+            if e.get("creator_id") != my_id:
+                continue
+
+            server_id = str(e.get("id", "")).strip() or None
+            if not server_id:
+                continue
+
+            if name in by_name:
+                # 既にローカル行がある → サーバ情報を付与
+                it = by_name[name]
+                it.server_has = True
+                it.server_id = server_id
+                updated += 1
+            else:
+                # サーバのみの行を追加
+                it = EmojiItem(
+                    checked=False,
+                    base_name=name,
+                    desired_name=name,
+                    local_path=None,
+                    local_kib=None,
+                    local_thumb=None,
+                    server_id=server_id,
+                    server_has=True,
+                    status=ItemStatus.SERVER_ONLY,
+                    detail="",
+                )
+                self.model.items.append(it)
+                added += 1
+
+        self.on_validate()
+        self.model.layoutChanged.emit()
+        self._set_status(f"Loaded server emojis (mine). added={added}, updated={updated}")
+
+        self._prefetch_visible_thumbs()
+
     @Slot()
     def on_upload(self) -> None:
         """Upload checked LOCAL_ONLY items. Abort if any checked item is not uploadable."""
@@ -771,6 +1119,40 @@ class MainWindow(QMainWindow):
         worker.signals.error.connect(self._on_worker_error)
         self.thread_pool.start(worker)
 
+    @Slot(object)
+    def _on_server_image_fetched(self, result: object) -> None:
+        emoji_id, b = result
+        assert isinstance(emoji_id, str)
+        assert isinstance(b, (bytes, bytearray))
+
+        self.server_image_cache[emoji_id] = bytes(b)
+
+        # still selected?
+        if self._current_selected_server_id != emoji_id:
+            return
+
+        self._show_image_bytes_in_preview(self.server_image_cache[emoji_id])
+        self._set_status("Server image loaded.")
+
+    @Slot(object)
+    def _on_thumb_fetched(self, result: object) -> None:
+        row, emoji_id, b = result
+        b = bytes(b)
+        self.server_image_cache[emoji_id] = b
+
+        it = self.model.items[row]
+        it.thumb_fetching = False
+
+        px = self._make_icon_pixmap_from_bytes(b, size=32)
+        if px is not None:
+            it.server_thumb = px
+            idx = self.model.index(row, EmojiTableModel.COL_THUMB)
+            self.model.dataChanged.emit(idx, idx, [Qt.ItemDataRole.DecorationRole])
+
+
+    # -------------------------
+    # Stubs for next steps
+    # -------------------------
     @Slot()
     def on_rename_stub(self) -> None:
         """Placeholder: rename is generally 'recreate new name + delete old'."""
@@ -780,7 +1162,11 @@ class MainWindow(QMainWindow):
     def on_selection_changed(self) -> None:
         sel = self.table.selectionModel().selectedRows()
         if not sel:
+            self._current_selected_server_id = None
+            if self._movie is not None:
+                self._movie.stop()
             self._movie = None
+            self._movie_buffer = None
             self.preview_label.setMovie(None)
             self.preview_label.setPixmap(QPixmap())
             self.preview_label.setText("Preview")
@@ -789,57 +1175,48 @@ class MainWindow(QMainWindow):
         row = sel[0].row()
         it = self.model.items[row]
 
-        if not it.local_path or not it.local_path.exists():
-            self._movie = None
-            self.preview_label.setMovie(None)
+        # まずローカル優先
+        if it.local_path and it.local_path.exists():
+            # （あなたの既存ローカル表示ロジック：GIFはKeepAspectRatioで再生、静止画はscaled）
+            # ここは既存のままでOK
+            # 例: self._show_local_path(it.local_path)
+            # ----
+            if it.local_path.suffix.lower() == ".gif":
+                # 既存の「KeepAspectRatioでGIFを描画する」実装に任せてOK
+                pass
+            return  # ローカルがあるならサーバは見ない
+
+        # ローカルが無い → サーバ画像プレビュー
+        if not it.server_id:
+            self._current_selected_server_id = None
             self.preview_label.setPixmap(QPixmap())
-            self.preview_label.setText("No local preview")
+            self.preview_label.setText("No local file, and no server_id.")
             return
 
-        # GIFはアニメで再生
-        if it.local_path.suffix.lower() == ".gif":
-            # 以前の movie を止める
-            if self._movie is not None:
-                self._movie.stop()
+        emoji_id = it.server_id
+        self._current_selected_server_id = emoji_id
 
-            self._movie = QMovie(str(it.local_path))
-            self.preview_label.setMovie(None)      # QLabelのmovie機能は使わない
-            self.preview_label.setPixmap(QPixmap())
-            self.preview_label.setText("")
-
-            def render_frame():
-                if self._movie is None:
-                    return
-                px = self._movie.currentPixmap()
-                if px.isNull():
-                    return
-                max_size = getattr(self, "preview_max", 256)
-                px = px.scaled(
-                    max_size, max_size,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation
-                )
-                self.preview_label.setPixmap(px)
-
-            # フレーム更新のたびに描画（縦横比を維持）
-            self._movie.frameChanged.connect(lambda _i: render_frame())
-            self._movie.start()
-            render_frame()
+        # キャッシュがあれば即表示
+        if emoji_id in self.server_image_cache:
+            self._show_image_bytes_in_preview(self.server_image_cache[emoji_id])
             return
 
+        # 無ければ取得
+        try:
+            client = self._make_client()
+        except Exception as e:
+            self._error(str(e))
+            return
 
-        # それ以外は静止画
-        self._movie = None
-        self.preview_label.setMovie(None)
+        self.preview_label.setPixmap(QPixmap())
+        self.preview_label.setText("Loading server image...")
 
-        px = QPixmap(str(it.local_path))
-        if not px.isNull():
-            px = px.scaled(200, 200, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-            self.preview_label.setPixmap(px)
-            self.preview_label.setText("")
-        else:
-            self.preview_label.setPixmap(QPixmap())
-            self.preview_label.setText("Failed to load image")
+        worker = FetchEmojiImageWorker(client, emoji_id)
+        worker.signals.progress.connect(self._set_status)
+        worker.signals.finished.connect(self._on_server_image_fetched)
+        worker.signals.error.connect(self._on_worker_error)
+        self.thread_pool.start(worker)
+
 
     @Slot(object)
     def _on_upload_finished(self, result: object) -> None:
@@ -933,12 +1310,15 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Delete result", "\n".join(lines) if lines else "No result.")
         self._set_status(f"Delete finished. deleted={len(success)} failed={len(failed)}")
 
-
-
+        
     def _refresh_server_cache_sync(self) -> bool:
-        """Refresh server_cache synchronously. Return True if success."""
+        """Refresh server_cache and session_user_id synchronously. Return True if success."""
         try:
             client = self._make_client()
+
+            me = client.get_me()
+            self.session_user_id = me["id"]
+
             items = client.list_emojis()
             cache: dict[str, dict] = {}
             for e in items:
@@ -950,6 +1330,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self._error(f"Failed to refresh server cache:\n{e}")
             return False
+
 
 
 def main() -> int:
