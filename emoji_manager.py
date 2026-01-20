@@ -329,7 +329,7 @@ class EmojiTableModel(QAbstractTableModel):
     COL_SERVER_ID = 7
 
     HEADERS = [
-        "使用",
+        "✅",
         "アイコン",
         "元の名前",
         "登録名（編集可）",
@@ -475,8 +475,8 @@ class MainWindow(QMainWindow):
         self.btn_load_server_mine = QPushButton("サーバ絵文字読込")
 
         self.btn_validate = QPushButton("検証・状態更新")
-        self.btn_go_upload = QPushButton("登録（チェック分）")
-        self.btn_delete = QPushButton("削除（チェック分）")
+        self.btn_go_upload = QPushButton("登録")
+        self.btn_delete = QPushButton("削除")
         # self.btn_rename = QPushButton("リネーム（再作成）（未実装）")
 
         self.status_label = QLabel("準備完了")
@@ -702,6 +702,38 @@ class MainWindow(QMainWindow):
         # 論理ピクセルに対するDPRを設定（ぼけ防止）
         canvas.setDevicePixelRatio(dpr)
         return canvas
+    
+
+    def _make_icon_pixmap_from_path(self, image_path: Path, logical_size: int = 32) -> QPixmap | None:
+        src = QPixmap(str(image_path))
+        if src.isNull():
+            return None
+
+        dpr = self.table.devicePixelRatioF()
+        target_px = int(round(logical_size * dpr))
+        target = QSize(target_px, target_px)
+
+        canvas = QPixmap(target)
+        canvas.fill(Qt.GlobalColor.transparent)
+
+        scaled = src
+        if src.width() > target_px or src.height() > target_px:
+            scaled = src.scaled(
+                target,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+
+        x = (target_px - scaled.width()) // 2
+        y = (target_px - scaled.height()) // 2
+        painter = QPainter(canvas)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        painter.drawPixmap(x, y, scaled)
+        painter.end()
+
+        canvas.setDevicePixelRatio(dpr)
+        return canvas
+
 
     def _prefetch_visible_thumbs(self) -> None:
         # テーブルが空なら何もしない
@@ -847,8 +879,12 @@ class MainWindow(QMainWindow):
         self._set_status("Error")
         self._error(msg)
 
+    def _normalize_key(self, name: str) -> str:
+        return name.strip().lower()
+
     @Slot()
     def on_load_folder(self) -> None:
+        # ... folder選択までは既存のまま ...
         folder = QFileDialog.getExistingDirectory(self, "Select Emoji Folder")
         if not folder:
             return
@@ -856,35 +892,108 @@ class MainWindow(QMainWindow):
         self._set_status(f"フォルダ読み込み中: {folder}")
         folder_path = Path(folder)
 
-        # Build local items
-        local_files = []
-        for p in folder_path.iterdir():
+        # 既存行の辞書（desired_name基準。必要なら base_name でも良い）
+        by_name: dict[str, EmojiItem] = {}
+        for it in self.model.items:
+            k = self._normalize_key(it.desired_name or it.base_name)
+            if k:
+                by_name[k] = it
+
+        # 今回フォルダに存在したキー（後で「消えたローカル」を外すなら使う）
+        seen_local: set[str] = set()
+
+        local_files: list[Path] = []
+        for p in folder_path.rglob("*"):  # 再帰したくないなら iterdir()
             if p.is_file() and p.suffix.lower() in IMAGE_EXTS:
                 local_files.append(p)
 
-        items: List[EmojiItem] = []
-        for p in sorted(local_files):
-            base = p.stem  # filename without extension
-            ok, norm, reason = validate_name(base)
-            size_kib = kib_of_file(p)
+        for p in local_files:
+            base = p.stem
+            k = self._normalize_key(base)
+            if not k:
+                continue
 
-            thumb = QPixmap(str(p))
-            if not thumb.isNull():
-                thumb = thumb.scaled(32, 32, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            seen_local.add(k)
 
-            it = EmojiItem(
-                checked=False,
-                base_name=base,
-                desired_name=norm if ok else base,
-                local_path=p,
-                local_kib=size_kib,
-                local_thumb=thumb,
-            )
-            # status computed later
-            items.append(it)
+            # ローカルサムネを生成（後述の高品質関数を使う）
+            thumb = self._make_icon_pixmap_from_path(p, logical_size=32)
+            kib = (p.stat().st_size + 1023) // 1024
 
-        self.model.set_items(items)
-        self._set_status(f"Loaded {len(items)} local files. Click Validate.")
+            if k in by_name:
+                it = by_name[k]
+                it.local_path = p
+                it.local_thumb = thumb
+                it.local_kib = int(kib)
+                # desired_name はユーザーが変えている可能性があるので基本触らない
+            else:
+                it = EmojiItem(
+                    checked=False,
+                    base_name=base,
+                    desired_name=base,
+                    local_path=p,
+                    local_kib=int(kib),
+                    local_thumb=thumb,
+                    server_id=None,
+                    server_has=False,
+                    status=ItemStatus.LOCAL_ONLY,
+                    detail="",
+                    server_thumb=None,
+                    thumb_fetching=False,
+                )
+                self.model.items.append(it)
+                by_name[k] = it
+
+        # 任意：フォルダから消えたローカルを外したい場合（置換に近い挙動）
+        for it in self.model.items:
+            k = self._normalize_key(it.base_name)
+            if it.local_path and k not in seen_local:
+                it.local_path = None
+                it.local_thumb = None
+                it.local_kib = None
+
+        self.on_validate()
+        self.model.layoutChanged.emit()
+        self._prefetch_visible_thumbs()  # サーバサムネもあるなら
+
+
+    # @Slot()
+    # def on_load_folder(self) -> None:
+    #     folder = QFileDialog.getExistingDirectory(self, "Select Emoji Folder")
+    #     if not folder:
+    #         return
+
+    #     self._set_status(f"フォルダ読み込み中: {folder}")
+    #     folder_path = Path(folder)
+
+    #     # Build local items
+    #     local_files = []
+    #     for p in folder_path.iterdir():
+    #         if p.is_file() and p.suffix.lower() in IMAGE_EXTS:
+    #             local_files.append(p)
+
+    #     items: List[EmojiItem] = []
+    #     for p in sorted(local_files):
+    #         base = p.stem  # filename without extension
+    #         ok, norm, reason = validate_name(base)
+    #         size_kib = kib_of_file(p)
+
+    #         thumb = QPixmap(str(p))
+    #         if not thumb.isNull():
+    #             thumb = thumb.scaled(32, 32, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+    #         it = EmojiItem(
+    #             checked=False,
+    #             base_name=base,
+    #             desired_name=norm if ok else base,
+    #             local_path=p,
+    #             local_kib=size_kib,
+    #             local_thumb=thumb,
+    #         )
+    #         # status computed later
+    #         items.append(it)
+
+    #     self.model.set_items(items)
+    #     self._set_status(f"Loaded {len(items)} local files. Click Validate.")
 
     @Slot()
     def on_validate(self) -> None:
@@ -1174,6 +1283,58 @@ class MainWindow(QMainWindow):
             idx = self.model.index(row, EmojiTableModel.COL_THUMB)
             self.model.dataChanged.emit(idx, idx, [Qt.ItemDataRole.DecorationRole])
 
+    def _show_local_preview(self, path: Path) -> None:
+        # 以前の movie を止める
+        if self._movie is not None:
+            self._movie.stop()
+        self._movie = None
+        self._movie_buffer = None  # ローカルでは未使用
+        self.preview_label.setMovie(None)
+
+        if path.suffix.lower() == ".gif":
+            # GIFはQMovieで再生しつつ、縦横比維持で毎フレーム描画
+            self.preview_label.setPixmap(QPixmap())
+            self.preview_label.setText("")
+
+            self._movie = QMovie(str(path))
+
+            def render_frame():
+                if self._movie is None:
+                    return
+                px = self._movie.currentPixmap()
+                if px.isNull():
+                    return
+                w = max(64, self.preview_label.width() - 16)
+                h = max(64, self.preview_label.height() - 16)
+                px = px.scaled(
+                    w, h,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                self.preview_label.setPixmap(px)
+
+            self._movie.frameChanged.connect(lambda _i: render_frame())
+            self._movie.start()
+            render_frame()
+            return
+
+        # 静止画
+        px = QPixmap(str(path))
+        if px.isNull():
+            self.preview_label.setPixmap(QPixmap())
+            self.preview_label.setText("画像を読み込めませんでした")
+            return
+
+        w = max(64, self.preview_label.width() - 16)
+        h = max(64, self.preview_label.height() - 16)
+        px = px.scaled(
+            w, h,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.preview_label.setPixmap(px)
+        self.preview_label.setText("")
+
 
     # -------------------------
     # Stubs for next steps
@@ -1202,14 +1363,9 @@ class MainWindow(QMainWindow):
 
         # まずローカル優先
         if it.local_path and it.local_path.exists():
-            # （あなたの既存ローカル表示ロジック：GIFはKeepAspectRatioで再生、静止画はscaled）
-            # ここは既存のままでOK
-            # 例: self._show_local_path(it.local_path)
-            # ----
-            if it.local_path.suffix.lower() == ".gif":
-                # 既存の「KeepAspectRatioでGIFを描画する」実装に任せてOK
-                pass
-            return  # ローカルがあるならサーバは見ない
+            self._current_selected_server_id = None
+            self._show_local_preview(it.local_path)
+            return
 
         # ローカルが無い → サーバ画像プレビュー
         if not it.server_id:
