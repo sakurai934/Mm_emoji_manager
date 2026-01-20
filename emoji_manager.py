@@ -9,8 +9,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-
-
+import platform
 
 import requests
 from PySide6.QtCore import (
@@ -25,9 +24,10 @@ from PySide6.QtCore import (
     QSize,
     QByteArray,
     QBuffer,
-    QIODevice
+    QIODevice,
+    QStandardPaths
 )
-from PySide6.QtGui import QPixmap, QMovie
+from PySide6.QtGui import QPixmap, QMovie, QPainter
 
 from PySide6.QtWidgets import (
     QApplication,
@@ -52,7 +52,7 @@ from PySide6.QtWidgets import (
 # Config / Validation
 # -----------------------------
 ALLOWED_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
-ALLOWED_NAME_RULE = "Allowed: lowercase a-z, digits 0-9, '_' and '-'. Pattern: ^[a-z0-9][a-z0-9_-]*$"
+ALLOWED_NAME_RULE = "使用可能: 小文字 a-z、数字 0-9、_ と -。パターン: ^[a-z0-9][a-z0-9_-]*$"
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif"}
 
@@ -164,65 +164,6 @@ class MattermostClient:
         r.raise_for_status()
         return r.content
 
-    # def create_emoji(self, name: str, image_path: Path) -> Dict[str, Any]:
-    #     """POST /api/v4/emoji multipart: emoji(json) + image(file)"""
-    #     url = f"{self.server_url}/api/v4/emoji"
-    #     payload = {"name": name}
-    #     files = {
-    #         "emoji": (None, json.dumps(payload), "application/json"),
-    #         "image": (image_path.name, image_path.read_bytes(), "application/octet-stream"),
-    #     }
-    #     r = self.session.post(url, files=files, timeout=self.timeout_sec)
-    #     r.raise_for_status()
-    #     return r.json()
-    
-    # def create_emoji(self, name: str, image_path: Path) -> Dict[str, Any]:
-    #     url = f"{self.server_url}/api/v4/emoji"
-    #     payload = {"name": name}
-    #     files = {
-    #         "emoji": (None, json.dumps(payload), "application/json"),
-    #         "image": (image_path.name, image_path.read_bytes(), "application/octet-stream"),
-    #     }
-    #     r = self.session.post(url, files=files, timeout=self.timeout_sec)
-    #     if r.status_code >= 400:
-    #         raise RuntimeError(f"HTTP {r.status_code} {r.reason}\nURL: {r.url}\nBody:\n{r.text}")
-    #     return r.json()
-    # def create_emoji(self, name: str, image_path: Path) -> Dict[str, Any]:
-    #     url = f"{self.server_url}/api/v4/emoji"
-    #     payload = {"name": name}
-    #     files = {
-    #         "emoji": (None, json.dumps(payload), "application/json"),
-    #         "image": (image_path.name, image_path.read_bytes(), "application/octet-stream"),
-    #     }
-    #     r = self.session.post(url, files=files, timeout=self.timeout_sec)
-    #     if r.status_code >= 400:
-    #         raise RuntimeError(f"HTTP {r.status_code} {r.reason}\nURL: {r.url}\nBody:\n{r.text}")
-    #     return r.json()
-    
-    # def create_emoji(self, name: str, image_path: Path) -> dict:
-    #     url = f"{self.server_url}/api/v4/emoji"
-
-    #     with open(image_path, "rb") as f:
-    #         files = {
-    #             "image": (image_path.name, f, "application/octet-stream"),
-    #         }
-    #         data = {
-    #             # emoji は「JSON文字列」として data で送るのが重要
-    #             "emoji": json.dumps({
-    #                 "name": name
-    #             })
-    #         }
-
-    #         r = self.session.post(url, data=data, files=files, timeout=self.timeout_sec)
-
-    #     if r.status_code >= 400:
-    #         raise RuntimeError(
-    #             f"HTTP {r.status_code}\nURL: {r.url}\nBody:\n{r.text}"
-    #         )
-
-    #     return r.json()
-
-
     def get_me(self) -> dict:
         url = f"{self.server_url}/api/v4/users/me"
         r = self.session.get(url, timeout=self.timeout_sec)
@@ -303,7 +244,7 @@ class BatchUploadWorker(QRunnable):
 
         for i, (row, name, path) in enumerate(self.tasks, start=1):
             try:
-                self.signals.progress.emit(f"Uploading {i}/{total}: :{name}:")
+                self.signals.progress.emit(f"登録中 {i}/{total}: :{name}:")
                 
                 creator_id = self.me["id"]
                 created = self.client.create_emoji(name, path, creator_id)
@@ -332,7 +273,7 @@ class BatchDeleteWorker(QRunnable):
 
         for i, (row, name, emoji_id) in enumerate(self.tasks, start=1):
             try:
-                self.signals.progress.emit(f"Deleting {i}/{total}: :{name}:")
+                self.signals.progress.emit(f"削除中 {i}/{total}: :{name}:")
                 self.client.delete_emoji(emoji_id)
                 results.append((row, True, None, ""))
             except Exception as e:
@@ -388,14 +329,14 @@ class EmojiTableModel(QAbstractTableModel):
     COL_SERVER_ID = 7
 
     HEADERS = [
-        "Use",
-        "Icon",
-        "Base Name",
-        "Target Name (editable)",
-        "Status",
-        "Detail",
-        "Local Path",
-        "Server ID",
+        "使用",
+        "アイコン",
+        "元の名前",
+        "登録名（編集可）",
+        "状態",
+        "詳細",
+        "ローカルパス",
+        "サーバID",
     ]
 
     def __init__(self) -> None:
@@ -497,7 +438,7 @@ class EmojiTableModel(QAbstractTableModel):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Mattermost Custom Emoji Manager (Skeleton)")
+        self.setWindowTitle("Mattermost カスタム絵文字マネージャ")
         self.resize(1200, 700)
 
         self.thread_pool = QThreadPool.globalInstance()
@@ -521,20 +462,24 @@ class MainWindow(QMainWindow):
         self.token_edit = QLineEdit()
         self.token_edit.setEchoMode(QLineEdit.Password)
 
+        self.remember_token_chk = QCheckBox("Remember token")
+        self.remember_token_chk.setChecked(False)
+
+
         self.soft_warn_edit = QLineEdit(str(DEFAULT_SOFT_WARN_KIB))
         self.hard_max_edit = QLineEdit(str(DEFAULT_HARD_MAX_KIB))
         self.max_suffix_edit = QLineEdit(str(DEFAULT_MAX_SUFFIX))
 
-        self.btn_connect = QPushButton("Connect & Refresh Server Cache")
-        self.btn_pick_folder = QPushButton("Load Folder…")
-        self.btn_load_server_mine = QPushButton("Load Server (Mine)")
+        self.btn_connect = QPushButton("接続・サーバキャッシュ更新")
+        self.btn_pick_folder = QPushButton("フォルダ読み込み…")
+        self.btn_load_server_mine = QPushButton("サーバ絵文字読込")
 
-        self.btn_validate = QPushButton("Validate / Recompute Status")
-        self.btn_go_upload = QPushButton("GO: Upload Checked")
-        self.btn_delete = QPushButton("Delete Checked (stub)")
-        self.btn_rename = QPushButton("Rename Checked (recreate stub)")
+        self.btn_validate = QPushButton("検証・状態更新")
+        self.btn_go_upload = QPushButton("登録（チェック分）")
+        self.btn_delete = QPushButton("削除（チェック分）")
+        # self.btn_rename = QPushButton("リネーム（再作成）（未実装）")
 
-        self.status_label = QLabel("Ready")
+        self.status_label = QLabel("準備完了")
 
         # Table + preview
         self.model = EmojiTableModel()
@@ -553,7 +498,7 @@ class MainWindow(QMainWindow):
         self.table.setColumnWidth(EmojiTableModel.COL_STATUS, 160)
         self.table.setColumnWidth(EmojiTableModel.COL_DETAIL, 260)
 
-        self.preview_label = QLabel("Preview")
+        self.preview_label = QLabel("プレビュー")
         self.preview_label.setAlignment(Qt.AlignCenter)
         self.preview_label.setMinimumWidth(260)
 
@@ -562,6 +507,8 @@ class MainWindow(QMainWindow):
         top_layout = QFormLayout(top)
         top_layout.addRow("Server URL", self.server_edit)
         top_layout.addRow("Token", self.token_edit)
+        top_layout.addRow("", self.remember_token_chk)
+
 
         limits_row = QHBoxLayout()
         limits_row.addWidget(QLabel("SoftWarn KiB"))
@@ -584,7 +531,7 @@ class MainWindow(QMainWindow):
         btn_row.addStretch(1)
         btn_row.addWidget(self.btn_go_upload)
         btn_row.addWidget(self.btn_delete)
-        btn_row.addWidget(self.btn_rename)
+        # btn_row.addWidget(self.btn_rename)
 
         btn_wrap = QWidget()
         btn_wrap.setLayout(btn_row)
@@ -614,7 +561,7 @@ class MainWindow(QMainWindow):
         self.btn_validate.clicked.connect(self.on_validate)
         self.btn_go_upload.clicked.connect(self.on_upload)
         self.btn_delete.clicked.connect(self.on_delete)
-        self.btn_rename.clicked.connect(self.on_rename_stub)
+        # self.btn_rename.clicked.connect(self.on_rename_stub)
 
         self.table.selectionModel().selectionChanged.connect(self.on_selection_changed)
 
@@ -623,6 +570,12 @@ class MainWindow(QMainWindow):
 
         self.table.verticalScrollBar().valueChanged.connect(lambda _v: self._prefetch_visible_thumbs())
 
+
+        self._load_config()
+
+    def closeEvent(self, event):
+        self._save_config()
+        super().closeEvent(event)
 
 
     # -------------------------
@@ -635,20 +588,20 @@ class MainWindow(QMainWindow):
             max_suffix = int(self.max_suffix_edit.text().strip())
             return soft_warn, hard_max, max_suffix
         except ValueError:
-            raise ValueError("Limits must be integers.")
+            raise ValueError("上限値は整数で入力してください。")
 
     def _make_client(self) -> MattermostClient:
         server = self.server_edit.text().strip()
         token = self.token_edit.text().strip()
         if not server or not token:
-            raise ValueError("Server URL and Token are required.")
+            raise ValueError("Server URL と Token は必須です。")
         return MattermostClient(server, token)
 
     def _set_status(self, text: str) -> None:
         self.status_label.setText(text)
 
     def _error(self, message: str) -> None:
-        QMessageBox.critical(self, "Error", message)
+        QMessageBox.critical(self, "エラー", message)
 
     def _is_gif_bytes(self, b: bytes) -> bool:
         return len(b) >= 6 and (b[:6] == b"GIF87a" or b[:6] == b"GIF89a")
@@ -700,7 +653,7 @@ class MainWindow(QMainWindow):
         px.loadFromData(b)
         if px.isNull():
             self.preview_label.setPixmap(QPixmap())
-            self.preview_label.setText("Failed to decode server image")
+            self.preview_label.setText("サーバ画像のデコードに失敗しました")
             return
 
         w = max(64, self.preview_label.width() - 16)
@@ -714,15 +667,41 @@ class MainWindow(QMainWindow):
         self.preview_label.setPixmap(px)
         self.preview_label.setText("")
 
-    def _make_icon_pixmap_from_bytes(self, b: bytes, size: int = 32) -> QPixmap | None:
-        px = QPixmap()
-        if not px.loadFromData(b):
+    def _make_icon_pixmap_from_bytes(self, b: bytes, logical_size: int = 32) -> QPixmap | None:
+        src = QPixmap()
+        if not src.loadFromData(b):
             return None
-        return px.scaled(
-            size, size,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation
-        )
+
+        # HiDPI: 表示上の 32px を、実ピクセル（DPR倍）で作る
+        dpr = self.table.devicePixelRatioF()  # 1.0, 1.25, 1.5, 2.0...
+        target_px = int(round(logical_size * dpr))
+        target = QSize(target_px, target_px)
+
+        # 透明キャンバス（最終表示サイズ）
+        canvas = QPixmap(target)
+        canvas.fill(Qt.GlobalColor.transparent)
+
+        # 画像を縦横比維持で縮小
+        # ※アップスケールしたいなら min() を外してください
+        scaled = src
+        if src.width() > target_px or src.height() > target_px:
+            scaled = src.scaled(
+                target,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+
+        # 中央合成（余白は透明）
+        x = (target_px - scaled.width()) // 2
+        y = (target_px - scaled.height()) // 2
+        painter = QPainter(canvas)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        painter.drawPixmap(x, y, scaled)
+        painter.end()
+
+        # 論理ピクセルに対するDPRを設定（ぼけ防止）
+        canvas.setDevicePixelRatio(dpr)
+        return canvas
 
     def _prefetch_visible_thumbs(self) -> None:
         # テーブルが空なら何もしない
@@ -785,6 +764,49 @@ class MainWindow(QMainWindow):
         worker.signals.error.connect(self._on_worker_error)
         self.thread_pool.start(worker)
 
+    def _config_path(self) -> Path:
+        # QStandardPaths はOSごとの「設定保存先」を返す
+        base = Path(QStandardPaths.writableLocation(QStandardPaths.AppConfigLocation))
+        # 例: C:\Users\<you>\AppData\Roaming\<AppName> になりがちなので、フォルダ名を固定
+        base = base.parent / "MmEmojiManager"
+        base.mkdir(parents=True, exist_ok=True)
+        return base / "config.json"
+
+    def _load_config(self) -> None:
+        p = self._config_path()
+        if not p.exists():
+            return
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            server = (data.get("server_url") or "").strip()
+            token = (data.get("token") or "").strip()
+            remember = bool(data.get("remember_token", False))
+
+            if server:
+                self.server_edit.setText(server)
+
+            self.remember_token_chk.setChecked(remember)
+            if remember and token:
+                self.token_edit.setText(token)
+        except Exception as e:
+            # 設定が壊れていてもアプリが起動できるようにする
+            self._set_status(f"Config load failed: {e}")
+
+    def _save_config(self) -> None:
+        p = self._config_path()
+        try:
+            remember = self.remember_token_chk.isChecked()
+            payload = {
+                "server_url": self.server_edit.text().strip(),
+                "remember_token": remember,
+                # トークンは remember がONのときだけ保存
+                "token": self.token_edit.text().strip() if remember else "",
+            }
+            p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as e:
+            self._set_status(f"Config save failed: {e}")
+
+
     # -------------------------
     # Actions
     # -------------------------
@@ -797,7 +819,7 @@ class MainWindow(QMainWindow):
             self._error(str(e))
             return
 
-        self._set_status("Refreshing server cache...")
+        self._set_status("サーバキャッシュ更新中...")
         worker = ApiWorker(client.list_emojis)
         worker.signals.finished.connect(self._on_server_cache_loaded)
         worker.signals.error.connect(self._on_worker_error)
@@ -817,6 +839,9 @@ class MainWindow(QMainWindow):
         # recompute statuses if local loaded
         self.on_validate()
 
+        self._save_config()
+
+
     @Slot(str)
     def _on_worker_error(self, msg: str) -> None:
         self._set_status("Error")
@@ -828,7 +853,7 @@ class MainWindow(QMainWindow):
         if not folder:
             return
 
-        self._set_status(f"Loading folder: {folder}")
+        self._set_status(f"フォルダ読み込み中: {folder}")
         folder_path = Path(folder)
 
         # Build local items
@@ -917,12 +942,12 @@ class MainWindow(QMainWindow):
     @Slot()
     def on_load_server_mine(self) -> None:
         # 常に最新化（安全）
-        self._set_status("Refreshing server cache...")
+        self._set_status("サーバキャッシュ更新中...")
         if not self._refresh_server_cache_sync():
             return
 
         if not self.session_user_id:
-            self._error("Failed to determine current user id.")
+            self._error("現在のユーザーIDの取得に失敗しました。")
             return
 
         my_id = self.session_user_id
@@ -972,7 +997,7 @@ class MainWindow(QMainWindow):
 
         self.on_validate()
         self.model.layoutChanged.emit()
-        self._set_status(f"Loaded server emojis (mine). added={added}, updated={updated}")
+        self._set_status(f"サーバ絵文字を読み込みました。追加={added} 更新={updated}")
 
         self._prefetch_visible_thumbs()
 
@@ -980,7 +1005,7 @@ class MainWindow(QMainWindow):
     def on_upload(self) -> None:
         """Upload checked LOCAL_ONLY items. Abort if any checked item is not uploadable."""
         # --- ALWAYS refresh server cache before upload ---
-        self._set_status("Refreshing server cache...")
+        self._set_status("サーバキャッシュ更新中...")
         if not self._refresh_server_cache_sync():
             return
 
@@ -995,7 +1020,7 @@ class MainWindow(QMainWindow):
 
         checked_rows = [(idx, it) for idx, it in enumerate(self.model.items) if it.checked]
         if not checked_rows:
-            QMessageBox.information(self, "Upload", "No rows checked.")
+            QMessageBox.information(self, "登録", "チェックされた行がありません。")
             return
 
         # 必ず最新の状態で判定したいので一度 validate をかける
@@ -1010,13 +1035,13 @@ class MainWindow(QMainWindow):
         if blockers:
             lines = []
             for idx, it in blockers:
-                lines.append(f"- row {idx+1}: :{it.desired_name}: status={it.status.name}")
+                lines.append(f"- 行 {idx+1}: :{it.desired_name}: 状態={it.status.name}")
             QMessageBox.critical(
                 self,
-                "Upload aborted",
-                "Some checked items cannot be uploaded.\n\n"
+                "登録中断",
+                "チェックされた項目の中に、登録できないものがあります。\n\n"
                 + "\n".join(lines)
-                + "\n\nResolve the issues (rename to a non-existing name, fix name rule, or reduce file size) and try again.",
+                + "\n\n問題を解消してから再実行してください（例: 未使用の名前に変更／命名規則に合わせる／ファイルサイズを削減）。",
             )
             return
 
@@ -1027,24 +1052,24 @@ class MainWindow(QMainWindow):
                 # ここに来るのは主に SERVER_ONLY 等。安全側で無視。
                 continue
             if not it.local_path or not it.local_path.exists():
-                QMessageBox.critical(self, "Upload aborted", f"Missing local file for row {idx+1}.")
+                QMessageBox.critical(self, "登録中断", f"行 {idx+1}.")
                 return
             tasks.append((idx, it.desired_name, it.local_path))
 
         if not tasks:
-            QMessageBox.information(self, "Upload", "No uploadable items (LOCAL_ONLY) among checked rows.")
+            QMessageBox.information(self, "登録", "チェックされた行の中に登録可能（LOCAL_ONLY）な項目がありません。")
             return
 
         # 実行確認（事故防止）
         if QMessageBox.question(
             self,
-            "Confirm Upload",
+            "登録確認",
             f"Upload {len(tasks)} emojis to server?\n\n"
-            "Note: If a name already exists on server, this tool will abort (no auto-suffix, no overwrite).",
+            "注意：同名がサーバに存在する場合は中断します（自動連番なし・上書きなし）。",
         ) != QMessageBox.Yes:
             return
 
-        self._set_status("Uploading...")
+        self._set_status("登録中...")
         worker = BatchUploadWorker(client, tasks)
         worker.signals.progress.connect(self._set_status)
         worker.signals.finished.connect(self._on_upload_finished)
@@ -1063,11 +1088,11 @@ class MainWindow(QMainWindow):
 
         checked_rows = [(idx, it) for idx, it in enumerate(self.model.items) if it.checked]
         if not checked_rows:
-            QMessageBox.information(self, "Delete", "No rows checked.")
+            QMessageBox.information(self, "削除", "チェックされた行がありません。")
             return
 
         # Always refresh cache before destructive ops
-        self._set_status("Refreshing server cache...")
+        self._set_status("サーバキャッシュ更新中...")
         if not self._refresh_server_cache_sync():
             return
         self.on_validate()
@@ -1085,9 +1110,9 @@ class MainWindow(QMainWindow):
         if not tasks:
             QMessageBox.information(
                 self,
-                "Delete",
-                "No deletable items among checked rows.\n"
-                "Only items with Server ID can be deleted.",
+                "削除",
+                "チェックされた行の中に削除可能な項目がありません。\n"
+                "Server ID を持つ項目のみ削除できます。",
             )
             return
 
@@ -1101,18 +1126,18 @@ class MainWindow(QMainWindow):
             extra_lines = "\n".join([f"- row {r+1}: :{n}: status={s} (no server_id)" for (r, n, s) in invalid[:10]])
             if len(invalid) > 10:
                 extra_lines += f"\n... and {len(invalid) - 10} more"
-            extra = "\n\nThese checked rows will be ignored (no Server ID):\n" + extra_lines
+            extra = "\n\n次の行は無視されます（Server ID がありません）:\n" + extra_lines
 
         if QMessageBox.question(
             self,
-            "Confirm Delete",
-            f"Delete {len(tasks)} emojis from server?\n\n{preview}{extra}\n\nThis operation cannot be undone.",
+            "削除確認",
+            f"{len(tasks)} 件の絵文字をサーバから削除しますか？\n\n{preview}{extra}\n\nこの操作は元に戻せません。",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         ) != QMessageBox.Yes:
             return
 
-        self._set_status("Deleting...")
+        self._set_status("削除中...")
         worker = BatchDeleteWorker(client, tasks)
         worker.signals.progress.connect(self._set_status)
         worker.signals.finished.connect(self._on_delete_finished)
@@ -1132,7 +1157,7 @@ class MainWindow(QMainWindow):
             return
 
         self._show_image_bytes_in_preview(self.server_image_cache[emoji_id])
-        self._set_status("Server image loaded.")
+        self._set_status("サーバ画像を読み込みました。")
 
     @Slot(object)
     def _on_thumb_fetched(self, result: object) -> None:
@@ -1143,7 +1168,7 @@ class MainWindow(QMainWindow):
         it = self.model.items[row]
         it.thumb_fetching = False
 
-        px = self._make_icon_pixmap_from_bytes(b, size=32)
+        px = self._make_icon_pixmap_from_bytes(b, logical_size=32)
         if px is not None:
             it.server_thumb = px
             idx = self.model.index(row, EmojiTableModel.COL_THUMB)
@@ -1156,7 +1181,7 @@ class MainWindow(QMainWindow):
     @Slot()
     def on_rename_stub(self) -> None:
         """Placeholder: rename is generally 'recreate new name + delete old'."""
-        QMessageBox.information(self, "Rename (stub)", "Rename (recreate) logic is not implemented yet.")
+        QMessageBox.information(self, "リネーム（未実装）", "リネーム（再作成）の処理は未実装です。")
 
     @Slot()
     def on_selection_changed(self) -> None:
@@ -1169,7 +1194,7 @@ class MainWindow(QMainWindow):
             self._movie_buffer = None
             self.preview_label.setMovie(None)
             self.preview_label.setPixmap(QPixmap())
-            self.preview_label.setText("Preview")
+            self.preview_label.setText("プレビュー")
             return
 
         row = sel[0].row()
@@ -1190,7 +1215,7 @@ class MainWindow(QMainWindow):
         if not it.server_id:
             self._current_selected_server_id = None
             self.preview_label.setPixmap(QPixmap())
-            self.preview_label.setText("No local file, and no server_id.")
+            self.preview_label.setText("ローカルファイルがなく、サーバIDもありません。")
             return
 
         emoji_id = it.server_id
@@ -1209,7 +1234,7 @@ class MainWindow(QMainWindow):
             return
 
         self.preview_label.setPixmap(QPixmap())
-        self.preview_label.setText("Loading server image...")
+        self.preview_label.setText("サーバ画像を取得中...")
 
         worker = FetchEmojiImageWorker(client, emoji_id)
         worker.signals.progress.connect(self._set_status)
@@ -1248,22 +1273,22 @@ class MainWindow(QMainWindow):
         # サマリ表示
         lines = []
         if success:
-            lines.append(f"✓ Success: {len(success)}")
+            lines.append(f"✓ 成功: {len(success)}")
             for n in success:
                 lines.append(f"  - :{n}:")
         if failed:
             lines.append("")
-            lines.append(f"✗ Failed: {len(failed)}")
+            lines.append(f"✗ 失敗: {len(failed)}")
             for n, msg in failed:
                 lines.append(f"  - :{n}: {msg}")
 
         QMessageBox.information(
             self,
-            "Upload result",
-            "\n".join(lines) if lines else "No result.",
+            "登録結果",
+            "\n".join(lines) if lines else "結果なし",
         )
 
-        self._set_status(f"Upload finished. success={len(success)} failed={len(failed)}")
+        self._set_status(f"登録完了 成功={len(success)} 失敗={len(failed)}")
 
     @Slot(object)
     def _on_delete_finished(self, result: object) -> None:
@@ -1298,17 +1323,17 @@ class MainWindow(QMainWindow):
 
         lines = []
         if success:
-            lines.append(f"✓ Deleted: {len(success)}")
+            lines.append(f"✓ 削除成功: {len(success)}")
             for n in success:
                 lines.append(f"  - :{n}:")
         if failed:
             lines.append("")
-            lines.append(f"✗ Failed: {len(failed)}")
+            lines.append(f"✗ 失敗: {len(failed)}")
             for n, msg in failed:
                 lines.append(f"  - :{n}: {msg}")
 
-        QMessageBox.information(self, "Delete result", "\n".join(lines) if lines else "No result.")
-        self._set_status(f"Delete finished. deleted={len(success)} failed={len(failed)}")
+        QMessageBox.information(self, "削除結果", "\n".join(lines) if lines else "結果なし")
+        self._set_status(f"削除完了 成功={len(success)} 失敗={len(failed)}")
 
         
     def _refresh_server_cache_sync(self) -> bool:
@@ -1328,7 +1353,7 @@ class MainWindow(QMainWindow):
             self.server_cache = cache
             return True
         except Exception as e:
-            self._error(f"Failed to refresh server cache:\n{e}")
+            self._error(f"サーバキャッシュの更新に失敗しました:\n{e}")
             return False
 
 
